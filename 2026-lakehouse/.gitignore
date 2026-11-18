@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+phase-one/v1/pg/
+phase-one/v2/pg/
+phase-two/silo/
+phase-two/*.parquet

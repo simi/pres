@@ -1,0 +1,99 @@
+name: lake-meetup-iceberg
+x-lakekeeper-env: &lakekeeper-env
+  LAKEKEEPER__PG_ENCRYPTION_KEY: meetup-demo-encryption-key
+  LAKEKEEPER__PG_DATABASE_URL_READ: postgresql://meetup:meetup@postgres:5432/catalog
+  LAKEKEEPER__PG_DATABASE_URL_WRITE: postgresql://meetup:meetup@postgres:5432/catalog
+  RUST_LOG: info
+services:
+  postgres:
+    image: postgres:17.6
+    environment:
+      POSTGRES_DB: catalog
+      POSTGRES_USER: meetup
+      POSTGRES_PASSWORD: meetup
+    tmpfs:
+      - /var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:55435:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U meetup -d catalog"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+  migrate:
+    image: quay.io/lakekeeper/catalog:v0.10.0
+    command: ["migrate"]
+    environment: *lakekeeper-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+  silo:
+    image: pgsty/silo:RELEASE.2026-10-26T00-00-00Z
+    user: "${DEMO_UID:-1000}:${DEMO_GID:-1000}"
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: meetup
+      MINIO_ROOT_PASSWORD: meetup-storage
+    volumes:
+      - ./silo:/data:Z
+    ports:
+      - "127.0.0.1:9001:9001"
+      - "127.0.0.1:19000:9000"
+    healthcheck:
+      test: ["CMD", "mcli", "ready", "local"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+  bucket:
+    image: pgsty/silo:RELEASE.2026-10-26T00-00-00Z
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - mcli alias set demo http://silo:9000 meetup meetup-storage && mcli mb --ignore-existing demo/warehouse
+    depends_on:
+      silo:
+        condition: service_healthy
+  lakekeeper:
+    image: quay.io/lakekeeper/catalog:v0.10.0
+    command: ["serve"]
+    environment: *lakekeeper-env
+    ports:
+      - "127.0.0.1:8181:8181"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      bucket:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "/home/nonroot/lakekeeper", "healthcheck"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+  bootstrap:
+    build: .
+    entrypoint: ["python", "bootstrap.py"]
+    depends_on:
+      lakekeeper:
+        condition: service_healthy
+  clickhouse:
+    image: clickhouse/clickhouse-server:26.10.2.103
+    environment:
+      CLICKHOUSE_USER: meetup
+      CLICKHOUSE_PASSWORD: meetup
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ports:
+      - "127.0.0.1:8123:8123"
+      - "127.0.0.1:9005:9005"
+    volumes:
+      - ./clickhouse/postgresql.xml:/etc/clickhouse-server/config.d/postgresql.xml:ro,Z
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--user", "meetup", "--password", "meetup", "--query", "SELECT 1"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
